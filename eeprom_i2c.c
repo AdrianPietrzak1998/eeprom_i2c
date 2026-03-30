@@ -1,8 +1,9 @@
-/*
- * eeprom_i2c.c
+/**
+ * @file eeprom_i2c.c
+ * @brief Lightweight I2C EEPROM driver implementation for STM32 HAL.
  *
- *  Created on: Feb 17, 2026
- *      Author: Adrian
+ * Created on: Feb 17, 2026
+ *     Author: Adrian
  */
 
 #include "eeprom_i2c.h"
@@ -12,15 +13,23 @@
 // Chip configuration structure (private)
 // ============================================================================
 
+/**
+ * @brief Internal, read-only descriptor for a supported EEPROM chip variant.
+ *
+ * One entry per EepromI2cChipType_t value is stored in the chipConfigs[] table
+ * in flash. The public API accesses this structure only through the pointer
+ * cached in EepromI2cHandle_t::chipConfig.
+ */
 struct EepromI2cChipConfig_t
 {
-    uint32_t totalSize;     // Total chip size in bytes
-    uint8_t  pageSize;      // Page write buffer size in bytes
-    uint8_t  writeCycleMs;  // Internal write cycle time in milliseconds
-    uint16_t addrSize;      // I2C_MEMADD_SIZE_8BIT or I2C_MEMADD_SIZE_16BIT
+    uint32_t totalSize;    /**< Total chip capacity in bytes. */
+    uint8_t  pageSize;     /**< Page buffer size in bytes; writes must not cross page boundaries. */
+    uint8_t  writeCycleMs; /**< Internal write cycle time in milliseconds (tWR from datasheet). */
+    uint16_t addrSize;     /**< Word address width: I2C_MEMADD_SIZE_8BIT or I2C_MEMADD_SIZE_16BIT. */
 };
 
-// Const configuration table in flash (only enabled chips compiled in)
+/** @brief Read-only chip configuration table stored in flash.
+ *         Only entries for enabled EEPROM_I2C_SUPPORT_xxx chips are compiled in. */
 static const EepromI2cChipConfig_t chipConfigs[] =
 {
     // -------------------------------------------------------------------------
@@ -97,7 +106,15 @@ static const EepromI2cChipConfig_t chipConfigs[] =
 // ============================================================================
 
 /**
- * @brief Calculate CRC16 Modbus (CRC-16-ANSI, polynomial 0x8005 reflected)
+ * @brief Calculate a CRC-16-Modbus checksum (CRC-16-ANSI, polynomial 0x8005 reflected).
+ *
+ * The initial value is 0xFFFF. Each byte is XORed into the low byte of the CRC
+ * register, then processed bit by bit using the reflected polynomial 0xA001.
+ *
+ * @param pData   Pointer to the data buffer to checksum.
+ * @param length  Number of bytes to process.
+ *
+ * @return Computed 16-bit CRC value.
  */
 static uint16_t CRC16_Modbus(const uint8_t *pData, uint16_t length)
 {
@@ -120,10 +137,19 @@ static uint16_t CRC16_Modbus(const uint8_t *pData, uint16_t length)
 }
 
 /**
- * @brief Return the number of upper address bits embedded in the device address byte.
- *        Applies to chips with 8-bit word addressing and totalSize > 256 (e.g. M24C04/08/16,
- *        AT24C04/08/16). These chips multiplex upper address bits into A0/A1/A2 (bits 3:1)
- *        of the I2C device address byte.
+ * @brief Return the number of upper address bits embedded in the I2C device address byte.
+ *
+ * Chips with 8-bit word addressing and a total capacity greater than 256 bytes
+ * (e.g. M24C04/08/16, AT24C04/08/16) cannot address all memory with a single
+ * 8-bit word address field. Instead, the upper address bits are multiplexed into
+ * the A0/A1/A2 positions (bits 3:1) of the I2C device address byte, effectively
+ * creating 256-byte "banks".
+ *
+ * @param config  Pointer to the chip configuration entry.
+ *
+ * @return Number of upper address bits that must be injected into the device
+ *         address byte. Returns 0 for chips with 16-bit word addressing or
+ *         8-bit word addressed chips that fit entirely within 256 bytes.
  */
 static uint8_t GetDevAddrBits(const EepromI2cChipConfig_t *config)
 {
@@ -137,9 +163,18 @@ static uint8_t GetDevAddrBits(const EepromI2cChipConfig_t *config)
 }
 
 /**
- * @brief Compute effective I2C device address for a given full memory address.
- *        For chips with bank addressing the upper address bits are injected into
- *        the device address byte at bits 3:1 (A0/A1/A2 positions).
+ * @brief Compute the effective I2C device address for a given absolute memory address.
+ *
+ * For bank-addressed chips (GetDevAddrBits() > 0), the upper bits of the full
+ * memory address are extracted and written into bits 3:1 (A0/A1/A2 positions)
+ * of the base device address. For all other chips the base address is returned
+ * unchanged.
+ *
+ * @param handle    Pointer to the EEPROM handle (provides base i2cAddr and chipConfig).
+ * @param fullAddr  Absolute byte address within the EEPROM (0 … totalSize-1).
+ *
+ * @return Effective I2C device address to use in HAL_I2C_Mem_Read/Write for
+ *         the given @p fullAddr.
  */
 static uint8_t ComputeDevAddr(EepromI2cHandle_t *handle, uint16_t fullAddr)
 {
@@ -153,9 +188,19 @@ static uint8_t ComputeDevAddr(EepromI2cHandle_t *handle, uint16_t fullAddr)
 }
 
 /**
- * @brief Read bytes from EEPROM via I2C.
- *        Handles bank-addressed chips (totalSize > 256, 8-bit word addr) by splitting
- *        the transfer at 256-byte bank boundaries and updating the device address each time.
+ * @brief Read a block of bytes from the EEPROM via I2C.
+ *
+ * For chips with 16-bit word addressing or chips whose capacity fits within
+ * 256 bytes, the read is issued as a single HAL call. For bank-addressed chips
+ * (8-bit word addressing, totalSize > 256 B) the transfer is split at each
+ * 256-byte bank boundary and the device address is recomputed for each segment.
+ *
+ * @param handle   Pointer to the EEPROM handle.
+ * @param memAddr  Absolute start address within the EEPROM to read from.
+ * @param pData    Destination buffer; must be at least @p size bytes long.
+ * @param size     Number of bytes to read.
+ *
+ * @return HAL_OK if all bytes were read successfully, or a HAL error code on failure.
  */
 static HAL_StatusTypeDef I2C_ReadBytes(EepromI2cHandle_t *handle, uint16_t memAddr, uint8_t *pData, uint16_t size)
 {
@@ -188,22 +233,54 @@ static HAL_StatusTypeDef I2C_ReadBytes(EepromI2cHandle_t *handle, uint16_t memAd
     return status;
 }
 
-// Returns the GPIO state that locks write protect (WP asserted)
+/**
+ * @brief Return the GPIO state that asserts (locks) the Write Protect signal.
+ *
+ * When WP is active LOW (standard), driving the pin HIGH locks the EEPROM.
+ * When WP is active HIGH (wpInverted = 1, e.g. NPN transistor), driving the
+ * pin LOW locks the EEPROM.
+ *
+ * @param handle  Pointer to the EEPROM handle.
+ * @return GPIO_PIN_SET or GPIO_PIN_RESET that must be written to WpPin to lock WP.
+ */
 static GPIO_PinState WP_LockState(EepromI2cHandle_t *handle)
 {
     return handle->wpInverted ? GPIO_PIN_RESET : GPIO_PIN_SET;
 }
 
-// Returns the GPIO state that unlocks write protect (WP de-asserted)
+/**
+ * @brief Return the GPIO state that de-asserts (unlocks) the Write Protect signal.
+ *
+ * When WP is active LOW (standard), driving the pin LOW unlocks the EEPROM.
+ * When WP is active HIGH (wpInverted = 1), driving the pin HIGH unlocks it.
+ *
+ * @param handle  Pointer to the EEPROM handle.
+ * @return GPIO_PIN_SET or GPIO_PIN_RESET that must be written to WpPin to unlock WP.
+ */
 static GPIO_PinState WP_UnlockState(EepromI2cHandle_t *handle)
 {
     return handle->wpInverted ? GPIO_PIN_SET : GPIO_PIN_RESET;
 }
 
 /**
- * @brief Write bytes to EEPROM via I2C with page-write support.
- *        Automatically splits transfers at page boundaries and waits for
- *        the internal write cycle after each page.
+ * @brief Write a block of bytes to the EEPROM via I2C with page-write support.
+ *
+ * The transfer is split at page boundaries to comply with the chip's page buffer
+ * limit. After each page write, the function waits for the internal write cycle
+ * (tWR) using HAL_Delay() before issuing the next write. The Write Protect GPIO
+ * is de-asserted at the start and re-asserted after the last page.
+ *
+ * For bank-addressed chips, the upper address bits are inserted into the device
+ * address and only the lower 8 bits are sent as the word address field.
+ *
+ * @param handle   Pointer to the EEPROM handle.
+ * @param memAddr  Absolute start address within the EEPROM to write to.
+ * @param pData    Source buffer; must be at least @p size bytes long.
+ * @param size     Number of bytes to write.
+ *
+ * @return HAL_OK if all bytes were written successfully, or a HAL error code
+ *         on the first failing page write. Write Protect is re-asserted even
+ *         on failure.
  */
 static HAL_StatusTypeDef I2C_WriteBytes(EepromI2cHandle_t *handle, uint16_t memAddr, const uint8_t *pData, uint16_t size)
 {
