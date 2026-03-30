@@ -14,7 +14,7 @@
 
 struct EepromI2cChipConfig_t
 {
-    uint16_t totalSize;     // Total chip size in bytes
+    uint32_t totalSize;     // Total chip size in bytes
     uint8_t  pageSize;      // Page write buffer size in bytes
     uint8_t  writeCycleMs;  // Internal write cycle time in milliseconds
     uint16_t addrSize;      // I2C_MEMADD_SIZE_8BIT or I2C_MEMADD_SIZE_16BIT
@@ -188,6 +188,18 @@ static HAL_StatusTypeDef I2C_ReadBytes(EepromI2cHandle_t *handle, uint16_t memAd
     return status;
 }
 
+// Returns the GPIO state that locks write protect (WP asserted)
+static GPIO_PinState WP_LockState(EepromI2cHandle_t *handle)
+{
+    return handle->wpInverted ? GPIO_PIN_RESET : GPIO_PIN_SET;
+}
+
+// Returns the GPIO state that unlocks write protect (WP de-asserted)
+static GPIO_PinState WP_UnlockState(EepromI2cHandle_t *handle)
+{
+    return handle->wpInverted ? GPIO_PIN_SET : GPIO_PIN_RESET;
+}
+
 /**
  * @brief Write bytes to EEPROM via I2C with page-write support.
  *        Automatically splits transfers at page boundaries and waits for
@@ -241,18 +253,6 @@ static HAL_StatusTypeDef I2C_WriteBytes(EepromI2cHandle_t *handle, uint16_t memA
 // ============================================================================
 // Public API
 // ============================================================================
-
-// Returns the GPIO state that locks write protect (WP asserted)
-static GPIO_PinState WP_LockState(EepromI2cHandle_t *handle)
-{
-    return handle->wpInverted ? GPIO_PIN_RESET : GPIO_PIN_SET;
-}
-
-// Returns the GPIO state that unlocks write protect (WP de-asserted)
-static GPIO_PinState WP_UnlockState(EepromI2cHandle_t *handle)
-{
-    return handle->wpInverted ? GPIO_PIN_SET : GPIO_PIN_RESET;
-}
 
 void EEPROM_I2C_Init(EepromI2cHandle_t *handle,
                      I2C_HandleTypeDef *hi2c,
